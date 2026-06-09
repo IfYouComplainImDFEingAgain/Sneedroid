@@ -1,0 +1,23 @@
+.gradle/
+build/
+**/build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+.kotlin/
+__pycache__/
+*.pyc
+# Never commit private agent instructions
+CLAUDE.md
+# Signing material — keep these private and OUT of version control
+*.jks
+*.keystore
+keystore.properties
+# Session cookies for whisper_test.py — never commit your own auth cookies
+cookies.txt
+# Internal design/spec docs — kept local, not published
+docs/
+# Design prototype / mockup — kept local, not published
+kiwichat-ui-design/

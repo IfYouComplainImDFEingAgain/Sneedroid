@@ -1,0 +1,70 @@
+name: Release
+
+# Build a signed release APK and publish it as a GitHub Release whenever a version tag is pushed:
+#   git tag v0.1.19 && git push origin v0.1.19
+#
+# Signing is driven by repository secrets (Settings → Secrets and variables → Actions). When they
+# are absent the build still runs and uploads an *unsigned* APK, so forks without the key work too.
+#   KEYSTORE_BASE64    - the release .jks, base64-encoded:  base64 -w0 app/sneedroid-release.jks
+#   KEYSTORE_PASSWORD  - keystore password
+#   KEY_ALIAS          - key alias (e.g. sneedroid)
+#   KEY_PASSWORD       - key password
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Configure signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "No signing secrets set — building an unsigned APK."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > app/sneedroid-release.jks
+          cat > keystore.properties <<EOF
+          storeFile=sneedroid-release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+      - name: Build release APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/app-release*.apk
+          generate_release_notes: true
+          fail_on_unmatched_files: true
