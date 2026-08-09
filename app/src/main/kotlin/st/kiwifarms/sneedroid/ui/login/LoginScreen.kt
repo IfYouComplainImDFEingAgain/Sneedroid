@@ -222,6 +222,7 @@ private fun ErrorBox(state: LoginUiState) {
 private fun phaseLabel(phase: LoginPhase): String = when (phase) {
     LoginPhase.FetchingPage -> "Connecting…"
     LoginPhase.SolvingChallenge -> "Solving challenge…"
+    LoginPhase.VerifyingBrowser -> "Verifying browser…"
     LoginPhase.SubmittingChallenge -> "Verifying…"
     LoginPhase.SigningIn -> "Signing in…"
 }

@@ -1,6 +1,7 @@
 package st.kiwifarms.sneedroid.core.net
 
 import st.kiwifarms.sneedroid.core.pow.KiwiFlareChallenge
+import st.kiwifarms.sneedroid.core.pow.PowAlgorithm
 import st.kiwifarms.sneedroid.core.pow.PowVariant
 import kotlin.time.Duration.Companion.minutes
 
@@ -35,7 +36,16 @@ object HtmlScrape {
         val salt = attrs["data-$prefix-challenge"] ?: return null
         val difficulty = attrs["data-$prefix-difficulty"]?.toIntOrNull() ?: return null
         val patience = attrs["data-sssg-patience"]?.toDoubleOrNull()?.minutes ?: 5.minutes
-        return KiwiFlareChallenge(salt = salt, difficulty = difficulty, variant = variant, patience = patience)
+        return KiwiFlareChallenge(
+            salt = salt,
+            difficulty = difficulty,
+            variant = variant,
+            patience = patience,
+            // Only Tartarus carries these; a blank attribute counts as absent so the
+            // client doesn't try to mint an assessment against an empty site key.
+            monocleKey = attrs["data-ttrs-monocle-key"]?.ifBlank { null },
+            algorithm = attrs["data-ttrs-algorithm"]?.ifBlank { null } ?: PowAlgorithm.SHA256,
+        )
     }
 
     /**

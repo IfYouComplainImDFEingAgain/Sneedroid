@@ -4,11 +4,14 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import okhttp3.Cookie
+import st.kiwifarms.sneedroid.core.net.CachedMonocleProvider
 import st.kiwifarms.sneedroid.core.net.CookieSerialization
 import st.kiwifarms.sneedroid.core.net.InMemoryCookieJar
 import st.kiwifarms.sneedroid.core.net.KiwiFarmsClient
 import st.kiwifarms.sneedroid.core.net.LoginOutcome
 import st.kiwifarms.sneedroid.core.net.LoginPhase
+import st.kiwifarms.sneedroid.core.net.MonocleProvider
+import st.kiwifarms.sneedroid.core.net.UnsupportedMonocleProvider
 
 /** Result of an attempted resume of a stored session. */
 enum class SessionState { LoggedIn, NeedsLogin }
@@ -20,7 +23,17 @@ enum class SessionState { LoggedIn, NeedsLogin }
 class AuthRepository(
     private val store: SecureStore,
     private val killswitchBlocked: () -> Boolean = { false },
+    /**
+     * Browser verification for the PoW gate. Wrapped in a cache so a burst of reconnects
+     * shares one assessment instead of spinning up a WebView each; the cache is dropped
+     * automatically when the gate refuses one. Null in tests and plain-JVM callers, which
+     * leaves [KiwiFarmsClient] to fail with an explanation rather than a bare rejection.
+     */
+    monocle: MonocleProvider? = null,
 ) {
+
+    private val monocle: MonocleProvider =
+        monocle?.let { CachedMonocleProvider(it) } ?: UnsupportedMonocleProvider
 
     private val cookieJar = InMemoryCookieJar(restoreCookies())
 
@@ -37,7 +50,8 @@ class AuthRepository(
     @Volatile
     private var client: KiwiFarmsClient = newClient()
 
-    private fun newClient() = KiwiFarmsClient(store.settings.domain, cookieJar, killswitchBlocked)
+    private fun newClient() =
+        KiwiFarmsClient(store.settings.domain, cookieJar, killswitchBlocked, monocle)
 
     private fun restoreCookies(): List<Cookie> =
         store.cookies?.let { CookieSerialization.decode(it) } ?: emptyList()

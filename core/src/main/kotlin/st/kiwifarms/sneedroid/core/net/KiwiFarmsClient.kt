@@ -14,10 +14,11 @@ import okhttp3.Request
 import st.kiwifarms.sneedroid.core.pow.KiwiFlare
 import st.kiwifarms.sneedroid.core.pow.KiwiFlareChallenge
 import st.kiwifarms.sneedroid.core.pow.KiwiFlareSolution
+import st.kiwifarms.sneedroid.core.pow.PowAlgorithm
 import st.kiwifarms.sneedroid.core.pow.PowVariant
 
 /** Coarse progress steps the login flow passes through, for UI feedback. */
-enum class LoginPhase { FetchingPage, SolvingChallenge, SubmittingChallenge, SigningIn }
+enum class LoginPhase { FetchingPage, SolvingChallenge, VerifyingBrowser, SubmittingChallenge, SigningIn }
 
 /** Result of a login attempt. */
 sealed interface LoginOutcome {
@@ -31,6 +32,15 @@ class KiwiFarmsLoginException(message: String) : Exception(message)
 
 /** Thrown when the PoW challenge can't be solved/submitted. */
 class KiwiFlareException(message: String) : Exception(message)
+
+/**
+ * The gate refused our Spur Monocle assessment (`monocle_required` / `monocle_invalid` / `MCL`).
+ *
+ * Kept distinct from a plain [KiwiFlareException] because the responses differ: a stale
+ * assessment is worth one retry with a freshly minted one, whereas a refused *valid* assessment
+ * means Spur judged the connection (VPN, datacentre or residential proxy) and retrying is futile.
+ */
+class MonocleRejectedException(message: String, val retryable: Boolean) : Exception(message)
 
 /**
  * HTTP side of the protocol: solve the Tartarus/KiwiFlare PoW and perform native login,
@@ -52,6 +62,10 @@ class KiwiFarmsClient(
     // the killswitch is on and no VPN is detected). Checked before any socket is opened, so even
     // the app-start session check can't touch the network while blocked.
     private val killswitchBlocked: () -> Boolean = { false },
+    // Mints the Spur Monocle assessment the Tartarus gate now demands alongside the PoW nonce.
+    // Needs a browser engine, so :core (plain JVM) can only declare the seam; the Android app
+    // supplies a WebView-backed implementation. See [MonocleProvider].
+    private val monocle: MonocleProvider = UnsupportedMonocleProvider,
 ) {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -64,11 +78,55 @@ class KiwiFarmsClient(
         domain: String,
         cookieJar: InMemoryCookieJar,
         killswitchBlocked: () -> Boolean = { false },
-    ) : this("https://$domain".toHttpUrl(), cookieJar, domain, killswitchBlocked = killswitchBlocked)
+        monocle: MonocleProvider = UnsupportedMonocleProvider,
+    ) : this(
+        "https://$domain".toHttpUrl(),
+        cookieJar,
+        domain,
+        killswitchBlocked = killswitchBlocked,
+        monocle = monocle,
+    )
 
-    /** Solve the PoW if the site is currently presenting a challenge; otherwise no-op. */
+    /**
+     * Solve the PoW if the site is currently presenting a challenge; otherwise no-op.
+     *
+     * Runs at most twice. A cached Monocle assessment the gate has stopped honouring looks
+     * exactly like a good one until it is refused, so the refusal is the signal to mint a fresh
+     * one — and because a rejected POST burns the salt, the retry has to fetch and re-solve a
+     * whole new challenge rather than resubmit the old one.
+     */
     suspend fun ensureClearance(onPhase: (LoginPhase) -> Unit = {}) {
-        val challenge = fetchChallenge() ?: return
+        var lastRejection: MonocleRejectedException? = null
+        repeat(2) {
+            val challenge = fetchChallenge() ?: return
+            try {
+                clearChallenge(challenge, onPhase)
+                return
+            } catch (e: MonocleRejectedException) {
+                if (!e.retryable) throw e
+                lastRejection = e
+                // Stale assessment: drop it so the next pass mints a new one.
+                monocle.invalidate()
+            }
+        }
+        throw lastRejection ?: KiwiFlareException("could not clear the PoW gate")
+    }
+
+    private suspend fun clearChallenge(challenge: KiwiFlareChallenge, onPhase: (LoginPhase) -> Unit) {
+        if (!challenge.algorithm.equals(PowAlgorithm.SHA256, ignoreCase = true)) {
+            // Fail by name rather than solve the wrong digest and read the rejection as a
+            // protocol bug. Argon2id needs a different solver and its own cost parameters.
+            throw KiwiFlareException(
+                "the gate switched to the '${challenge.algorithm}' proof-of-work algorithm, " +
+                    "which this client does not implement"
+            )
+        }
+        // Minted before the solve: it is independent of the salt, and doing it first means a
+        // refusal costs no CPU. It is also the step most likely to need the user's attention.
+        val assessment = challenge.monocleKey?.let { key ->
+            onPhase(LoginPhase.VerifyingBrowser)
+            monocle.assessment(key)
+        }
         onPhase(LoginPhase.SolvingChallenge)
         val solution = KiwiFlare.solve(challenge, baseNonce = nonceBase())
         onPhase(LoginPhase.SubmittingChallenge)
@@ -78,7 +136,8 @@ class KiwiFarmsClient(
                 cookieJar.add(clearanceCookie("sssg_clearance", token))
             }
             PowVariant.TTRS -> {
-                submitTtrs(solution) // sets ttrs_clearance via the jar (and we add it explicitly)
+                // sets ttrs_clearance via the jar (and we add it explicitly)
+                submitTtrs(solution, assessment)
             }
         }
     }
@@ -98,13 +157,18 @@ class KiwiFarmsClient(
             ?: throw KiwiFlareException("sssg response missing auth: ${resp.body}")
     }
 
-    private suspend fun submitTtrs(solution: KiwiFlareSolution): String {
-        val form = FormBody.Builder().add("salt", solution.salt).add("nonce", solution.nonce.toString()).build()
+    private suspend fun submitTtrs(solution: KiwiFlareSolution, assessment: String?): String {
+        val form = FormBody.Builder()
+            .add("salt", solution.salt)
+            .add("nonce", solution.nonce.toString())
+            .apply { if (assessment != null) add("monocle", assessment) }
+            .build()
         val resp = post(baseUrl.newBuilder().encodedPath("/.ttrs/challenge").build(), form)
         val obj = parseAnswer(resp, "/.ttrs/challenge")
         val success = obj["success"]?.jsonPrimitive?.content?.toBoolean() ?: false
         if (!success) {
             val reason = obj["reason"]?.jsonPrimitive?.content ?: "unknown"
+            monocleRejection(reason)?.let { throw it }
             throw KiwiFlareException("ttrs rejected solution: $reason")
         }
         // The clearance cookie is delivered via Set-Cookie; the jar captures it, but we
@@ -120,15 +184,42 @@ class KiwiFarmsClient(
      * Parse a PoW answer response, failing with a *useful* message instead of a cryptic
      * "unexpected end of input" when the Tartarus/KiwiFlare gate returns an empty body or a
      * non-JSON page (rate-limit, IP block, gateway error). [endpoint] is named for the error.
+     *
+     * A JSON body is parsed whatever the status code: the gate reports a refused Monocle
+     * assessment as HTTP 403 with `{"success":false,"reason":"monocle_invalid"}`, and rejecting
+     * that on the status alone would throw away the one field that says what to do about it.
      */
     private fun parseAnswer(resp: Resp, endpoint: String): kotlinx.serialization.json.JsonObject {
-        if (resp.code != 200 || resp.body.isBlank()) {
-            val detail = if (resp.body.isBlank()) "empty body" else "body: ${resp.body.take(200)}"
-            throw KiwiFlareException("PoW gate at $endpoint returned HTTP ${resp.code} ($detail).")
+        if (resp.body.isBlank()) {
+            throw KiwiFlareException("PoW gate at $endpoint returned HTTP ${resp.code} (empty body).")
         }
         return runCatching { json.parseToJsonElement(resp.body).jsonObject }.getOrElse {
             throw KiwiFlareException("PoW gate at $endpoint returned non-JSON (HTTP ${resp.code}): ${resp.body.take(200)}")
         }
+    }
+
+    /**
+     * Map a gate rejection reason to a [MonocleRejectedException], or null if it isn't about
+     * browser verification.
+     *
+     * `monocle_required` and `monocle_invalid` mean the assessment was missing, malformed or
+     * stale — worth one retry with a freshly minted one. `MCL` means Spur judged the assessment
+     * genuine and the *connection* unacceptable (VPN, datacentre or residential proxy), which no
+     * amount of re-minting will change.
+     */
+    private fun monocleRejection(reason: String): MonocleRejectedException? = when (reason) {
+        "monocle_required" -> MonocleRejectedException(
+            "the gate demanded browser verification and none was supplied", retryable = true
+        )
+        "monocle_invalid" -> MonocleRejectedException(
+            "the gate refused the browser verification token as invalid or expired", retryable = true
+        )
+        "MCL" -> MonocleRejectedException(
+            "browser verification was refused — the gate rejects this connection. " +
+                "A VPN, datacentre or residential proxy address is the usual cause.",
+            retryable = false,
+        )
+        else -> null
     }
 
     /** True if the stored cookies already represent a logged-in session. */

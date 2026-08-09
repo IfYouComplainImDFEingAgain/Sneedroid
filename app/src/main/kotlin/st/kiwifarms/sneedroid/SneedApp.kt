@@ -25,6 +25,7 @@ import st.kiwifarms.sneedroid.data.SecureStore
 import st.kiwifarms.sneedroid.data.MacroStore
 import st.kiwifarms.sneedroid.data.Notifier
 import st.kiwifarms.sneedroid.data.SettingsRepository
+import st.kiwifarms.sneedroid.data.WebViewMonocleProvider
 import st.kiwifarms.sneedroid.data.WhisperStore
 import st.kiwifarms.sneedroid.ui.chat.EmoteTable
 
@@ -36,7 +37,17 @@ class AppContainer(context: Context) {
     // Shared IP-killswitch gate: consulted by the auth HTTP client (login/resume) and the chat
     // WebSocket alike, so no path reaches KiwiFarms while blocked.
     val killswitchGate: KillswitchGate = KillswitchGate(settingsRepository, connectivityMonitor)
-    val authRepository: AuthRepository = AuthRepository(secureStore, killswitchBlocked = { killswitchGate.blocked.value })
+    val authRepository: AuthRepository = AuthRepository(
+        secureStore,
+        killswitchBlocked = { killswitchGate.blocked.value },
+        // The PoW gate's Spur Monocle step is the one part of login that needs a browser
+        // engine; everything else stays on OkHttp. See WebViewMonocleProvider.
+        monocle = WebViewMonocleProvider(
+            context = context.applicationContext,
+            killswitchBlocked = { killswitchGate.blocked.value },
+            domain = secureStore.settings.domain,
+        ),
+    )
     val debugLog: DebugLog = DebugLog()
     val errorReporter: ErrorReporter = ErrorReporter(debugLog)
     val whisperStore: WhisperStore = WhisperStore(context)

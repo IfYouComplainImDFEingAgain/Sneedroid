@@ -22,17 +22,37 @@ enum class PowVariant { SSSG, TTRS }
 /**
  * A KiwiFlare / Tartarus proof-of-work challenge, as scraped from `GET /`.
  *
- * @param salt       the challenge string concatenated before the nonce
- * @param difficulty the number of leading zero **bits** required in the SHA-256 hash
- * @param variant    which submission endpoint/format to use
- * @param patience   max time the solver may run before giving up
+ * @param salt        the challenge string concatenated before the nonce
+ * @param difficulty  the number of leading zero **bits** required in the SHA-256 hash
+ * @param variant     which submission endpoint/format to use
+ * @param patience    max time the solver may run before giving up
+ * @param monocleKey  Spur Monocle site key (`data-ttrs-monocle-key`), or null when the gate is
+ *                    not demanding browser verification. When present, the solution POST must
+ *                    carry a `monocle` assessment field or it is refused. See [PowAlgorithm].
+ * @param algorithm   the digest the gate wants (`data-ttrs-algorithm`). Only [PowAlgorithm.SHA256]
+ *                    is implemented; the value is carried so an unsupported one fails loudly at
+ *                    submission time rather than silently burning CPU on the wrong hash.
  */
 data class KiwiFlareChallenge(
     val salt: String,
     val difficulty: Int,
     val variant: PowVariant,
     val patience: Duration = 5.minutes,
+    val monocleKey: String? = null,
+    val algorithm: String = PowAlgorithm.SHA256,
 )
+
+/** Values Tartarus uses for `data-ttrs-algorithm`. */
+object PowAlgorithm {
+    const val SHA256 = "sha256"
+
+    /**
+     * Argon2id, which the gate can switch to at will (the challenge worker ships a WASM
+     * implementation and reads `data-ttrs-argon2-{m,t,p}-cost`). We do not implement it; the
+     * constant exists so the failure names itself instead of arriving as a rejected solution.
+     */
+    const val ARGON2ID = "argon2id"
+}
 
 /** A solved challenge: the winning nonce for [salt]. */
 data class KiwiFlareSolution(val salt: String, val nonce: Long)
