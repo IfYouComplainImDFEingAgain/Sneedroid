@@ -11,6 +11,8 @@ import st.kiwifarms.sneedroid.core.net.KiwiFarmsClient
 import st.kiwifarms.sneedroid.core.net.LoginOutcome
 import st.kiwifarms.sneedroid.core.net.LoginPhase
 import st.kiwifarms.sneedroid.core.net.MonocleProvider
+import st.kiwifarms.sneedroid.core.net.MonocleRejectedException
+import st.kiwifarms.sneedroid.core.net.MonocleUnavailable
 import st.kiwifarms.sneedroid.core.net.UnsupportedMonocleProvider
 
 /** Result of an attempted resume of a stored session. */
@@ -30,6 +32,15 @@ class AuthRepository(
      * leaves [KiwiFarmsClient] to fail with an explanation rather than a bare rejection.
      */
     monocle: MonocleProvider? = null,
+    /**
+     * Records why an automatic recovery failed, for the debug window.
+     *
+     * Without this the reconnect loop is silent: `refreshSession` deliberately swallows
+     * failures so a transient one doesn't bounce the user to the login screen, which left
+     * "solved the PoW fine" and "the gate refused browser verification outright" looking
+     * identical from the outside — a reconnect that never succeeds and never says why.
+     */
+    private val onDiagnostic: (String, String) -> Unit = { _, _ -> },
 ) {
 
     private val monocle: MonocleProvider =
@@ -110,7 +121,13 @@ class AuthRepository(
      */
     suspend fun refreshSession(onPhase: (LoginPhase) -> Unit = {}): Boolean {
         // 1. Re-solve the PoW if the gate is challenging us again (clearance expiry).
-        runCatching { client.ensureClearance(onPhase) }.getOrElse { return false }
+        runCatching { client.ensureClearance(onPhase) }.getOrElse { error ->
+            // Still swallowed — a transient failure must not force a sign-in — but no
+            // longer silently. A refused browser verification in particular will never
+            // fix itself, and the user has no way to guess that from a reconnect loop.
+            onDiagnostic("clearance", describeClearanceFailure(error))
+            return false
+        }
         persistCookies()
 
         // 2. If the session is still valid, the refreshed clearance was the fix.
@@ -129,6 +146,15 @@ class AuthRepository(
         }
         _sessionExpired.tryEmit(Unit)
         return false
+    }
+
+    /** A message naming the actual obstacle, rather than "reconnect failed" for everything. */
+    private fun describeClearanceFailure(error: Throwable): String = when (error) {
+        is MonocleRejectedException ->
+            if (error.retryable) "browser verification rejected: ${error.message}"
+            else "browser verification REFUSED (will not recover on its own): ${error.message}"
+        is MonocleUnavailable -> "could not obtain browser verification: ${error.message}"
+        else -> "${error::class.simpleName}: ${error.message ?: "no detail"}"
     }
 
     private var pendingRemember = false

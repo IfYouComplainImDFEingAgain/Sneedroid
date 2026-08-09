@@ -37,6 +37,9 @@ class AppContainer(context: Context) {
     // Shared IP-killswitch gate: consulted by the auth HTTP client (login/resume) and the chat
     // WebSocket alike, so no path reaches KiwiFarms while blocked.
     val killswitchGate: KillswitchGate = KillswitchGate(settingsRepository, connectivityMonitor)
+    // Declared before authRepository so the auth layer can record why an automatic
+    // recovery failed; a silent reconnect loop is indistinguishable from a hung one.
+    val debugLog: DebugLog = DebugLog()
     val authRepository: AuthRepository = AuthRepository(
         secureStore,
         killswitchBlocked = { killswitchGate.blocked.value },
@@ -47,8 +50,8 @@ class AppContainer(context: Context) {
             killswitchBlocked = { killswitchGate.blocked.value },
             domain = secureStore.settings.domain,
         ),
+        onDiagnostic = { type, message -> debugLog.add(type, message) },
     )
-    val debugLog: DebugLog = DebugLog()
     val errorReporter: ErrorReporter = ErrorReporter(debugLog)
     val whisperStore: WhisperStore = WhisperStore(context)
     val macroStore: MacroStore = MacroStore(context)

@@ -225,13 +225,13 @@ class ChatRepository(
                 if (!first) _state.update { it.copy(connection = ConnectionState.Reconnecting) }
                 first = false
 
-                // A prior attempt was rejected at join: renew the token before reconnecting.
-                // Join rejections are usually an expired PoW clearance (~18h) or session, not
-                // a real permissions block, so this recovers the common case silently.
+                // A prior attempt was refused — at the join, or at the upgrade with a 203.
+                // Either is usually an expired PoW clearance (~18h) or session rather than a
+                // real permissions block, so this recovers the common case silently.
                 if (refreshBeforeNext) {
                     refreshBeforeNext = false
                     _state.update { it.copy(connection = ConnectionState.Reconnecting) }
-                    debugLog("auth", "join rejected — refreshing token ($joinFailures/$JOIN_FAIL_LIMIT)")
+                    debugLog("auth", "refused — refreshing token ($joinFailures/$JOIN_FAIL_LIMIT)")
                     // refreshAuth handles routing the user to sign-in when the session is truly
                     // dead (it emits sessionExpired, which tears this connection down). A false
                     // here may just be a transient PoW/network hiccup, so don't give up — fall
@@ -291,6 +291,15 @@ class ChatRepository(
                     // The UI shows a top "Reconnecting…" banner off the Reconnecting state, so
                     // no toast here; just record the failure for the debug window.
                     debugLog("connection", "FAILURE: ${e.message}")
+                    // A 203 on the *upgrade* is the gate saying "solve a challenge first", i.e.
+                    // the PoW clearance has lapsed. The socket never opens, so there is no join
+                    // to be rejected and the join-failure path above never runs — without this
+                    // the loop reconnects into the same 203 forever. Bounded by the same counter
+                    // so a genuinely unrecoverable gate doesn't become a hot re-auth loop.
+                    if (isClearanceExpired(e) && joinFailures < JOIN_FAIL_LIMIT) {
+                        joinFailures++
+                        refreshBeforeNext = true
+                    }
                 }
                 if (!isActive) break
                 _state.update { it.copy(connection = ConnectionState.Reconnecting) }
@@ -303,6 +312,15 @@ class ChatRepository(
             }
         }
     }
+
+    /**
+     * Whether a failed upgrade was the PoW gate demanding a fresh challenge.
+     *
+     * OkHttp reports it as `Expected HTTP 101 response but was '203 Non Authoritative
+     * Information'` — there is no status code on the exception, so the text is what we have.
+     */
+    private fun isClearanceExpired(e: Exception): Boolean =
+        e.message?.contains("203") == true
 
     /** The server's join-rejection notice (KiwiFarms: "You cannot join this room…"). */
     private fun isJoinFailure(text: String): Boolean =
