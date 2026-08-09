@@ -30,8 +30,10 @@ import kotlin.coroutines.resume
  * So this class hands back a string and nothing else. The challenge fetch, the proof of work,
  * the solution POST, the cookie jar and the chat WebSocket all stay on OkHttp, where the
  * killswitch interceptor and the cookie handling already live. That split is not merely tidy:
- * the `ttrs_clearance` the gate issues *is* bound to the TLS fingerprint that minted it, so a
- * session obtained wholly inside a WebView would be refused on OkHttp's connections anyway.
+ * the `ttrs_clearance` the gate issues *is* bound to the TLS ClientHello that earned it, and a
+ * clearance taken out of a real Chromium was measured being refused by two other HTTP stacks
+ * even when replayed with Chromium's own User-Agent. Doing the whole login in a WebView and
+ * exporting the cookies would leave the app permanently re-clearing.
  *
  * **The polling is driven from Kotlin on purpose.** A WebView that is never attached to a
  * window gets its JavaScript timers throttled hard by Chromium — in practice a `setTimeout`
