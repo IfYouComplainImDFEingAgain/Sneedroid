@@ -25,6 +25,8 @@ import st.kiwifarms.sneedroid.data.SecureStore
 import st.kiwifarms.sneedroid.data.MacroStore
 import st.kiwifarms.sneedroid.data.Notifier
 import st.kiwifarms.sneedroid.data.SettingsRepository
+import st.kiwifarms.sneedroid.core.net.FallbackMonocleProvider
+import st.kiwifarms.sneedroid.core.net.HttpMonocleProvider
 import st.kiwifarms.sneedroid.data.WebViewMonocleProvider
 import st.kiwifarms.sneedroid.data.WhisperStore
 import st.kiwifarms.sneedroid.ui.chat.EmoteTable
@@ -43,12 +45,19 @@ class AppContainer(context: Context) {
     val authRepository: AuthRepository = AuthRepository(
         secureStore,
         killswitchBlocked = { killswitchGate.blocked.value },
-        // The PoW gate's Spur Monocle step is the one part of login that needs a browser
-        // engine; everything else stays on OkHttp. See WebViewMonocleProvider.
-        monocle = WebViewMonocleProvider(
-            context = context.applicationContext,
-            killswitchBlocked = { killswitchGate.blocked.value },
-            domain = secureStore.settings.domain,
+        // The PoW gate's Spur Monocle step. Spur's loader ships an already-minted assessment,
+        // so the fast path is a plain HTTP GET; the WebView stays behind it because that
+        // shortcut is undocumented and could stop working without notice.
+        monocle = FallbackMonocleProvider(
+            primary = HttpMonocleProvider(killswitchBlocked = { killswitchGate.blocked.value }),
+            fallback = WebViewMonocleProvider(
+                context = context.applicationContext,
+                killswitchBlocked = { killswitchGate.blocked.value },
+                domain = secureStore.settings.domain,
+            ),
+            onFallback = { reason ->
+                debugLog.add("monocle", "browserless verification unavailable ($reason); using the WebView")
+            },
         ),
         onDiagnostic = { type, message -> debugLog.add(type, message) },
     )
